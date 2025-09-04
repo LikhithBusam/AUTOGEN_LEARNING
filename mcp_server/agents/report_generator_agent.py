@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import json
 import os
 from jinja2 import Environment, FileSystemLoader
-from weasyprint import HTML, CSS
 import base64
 from io import BytesIO
 import matplotlib.pyplot as plt
@@ -16,6 +15,16 @@ from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_agentchat.messages import TextMessage
 from config.settings import settings
+
+# Optional weasyprint import with fallback
+try:
+    from weasyprint import HTML, CSS
+    WEASYPRINT_AVAILABLE = True
+except Exception as e:
+    print(f"Warning: weasyprint not available ({type(e).__name__}: {e}). PDF generation will be limited.")
+    WEASYPRINT_AVAILABLE = False
+    HTML = None
+    CSS = None
 
 class ReportGeneratorAgent:
     """Agent specialized in generating comprehensive financial reports"""
@@ -250,6 +259,18 @@ class ReportGeneratorAgent:
         """Generate PDF report from HTML template"""
         
         try:
+            if not WEASYPRINT_AVAILABLE:
+                # Fallback: return HTML as bytes with warning
+                html_content = await self._generate_html_report(report_data, template_name)
+                warning_html = f"""
+                <div style="background: #fff3cd; padding: 10px; border: 1px solid #ffeaa7; margin: 10px; border-radius: 5px;">
+                    <strong>Note:</strong> PDF generation not available. WeasyPrint requires additional system libraries on Windows.
+                    <br>Please use HTML format or install WeasyPrint dependencies.
+                </div>
+                {html_content}
+                """
+                return warning_html.encode('utf-8')
+            
             # First generate HTML
             html_content = await self._generate_html_report(report_data, template_name)
             

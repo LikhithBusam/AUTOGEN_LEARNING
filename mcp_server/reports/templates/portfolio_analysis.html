@@ -1,0 +1,66 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Portfolio Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+        .header { background-color: #27ae60; color: white; padding: 20px; border-radius: 5px; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        .positive { color: green; }
+        .negative { color: red; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Portfolio Analysis Report</h1>
+        <h2>${{ "{:,.2f}"|format(metrics.total_value) }} 
+        <span class="{% if metrics.total_gain_loss_percent > 0 %}positive{% else %}negative{% endif %}">
+            ({{ "%+.2f"|format(metrics.total_gain_loss_percent) }}%)
+        </span></h2>
+        <p>Generated: {{ generated_at }}</p>
+    </div>
+    
+    <div class="section">
+        <h3>Portfolio Holdings</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Symbol</th>
+                    <th>Shares</th>
+                    <th>Current Price</th>
+                    <th>Value</th>
+                    <th>Gain/Loss</th>
+                    <th>Weight</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for symbol, position in portfolio.items() %}
+                <tr>
+                    <td>{{ symbol }}</td>
+                    <td>{{ position.shares }}</td>
+                    <td>${{ "%.2f"|format(position.current_price) }}</td>
+                    <td>${{ "{:,.2f}"|format(position.position_value) }}</td>
+                    <td class="{% if position.gain_loss_percent > 0 %}positive{% else %}negative{% endif %}">
+                        {{ "%+.2f"|format(position.gain_loss_percent) }}%
+                    </td>
+                    <td>{{ "%.1f"|format(position.weight) }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="section">
+        <h3>Recommendations</h3>
+        <ul>
+            {% for rec in recommendations %}
+            <li>{{ rec }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</body>
+</html>
+        

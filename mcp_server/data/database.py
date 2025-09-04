@@ -217,7 +217,7 @@
 
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, JSON, select
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -305,14 +305,14 @@ class DatabaseManager:
         self.async_session = async_session
 
     async def save_user_query(self, user_id: str, query_text: str, response_data: dict,
-                             processing_time: float, agents_involved: list):
+                             processing_time: float = 0.0, agents_involved: list = None):
         async with self.async_session() as session:
             query = UserQuery(
                 user_id=user_id,
                 query_text=query_text,
                 response_data=response_data,
                 processing_time=processing_time,
-                agents_involved=agents_involved
+                agents_involved=agents_involved or []
             )
             session.add(query)
             await session.commit()
@@ -322,25 +322,25 @@ class DatabaseManager:
     async def get_user_portfolio(self, user_id: str, portfolio_name: str = "default"):
         async with self.async_session() as session:
             result = await session.execute(
-                Portfolio.__table__.select().where(
+                select(Portfolio).where(
                     Portfolio.user_id == user_id,
                     Portfolio.portfolio_name == portfolio_name,
                     Portfolio.is_active == True
                 )
             )
-            portfolio = result.first()
+            portfolio = result.scalar_one_or_none()
             return portfolio
 
     async def update_portfolio(self, user_id: str, holdings: dict, portfolio_name: str = "default"):
         async with self.async_session() as session:
             result = await session.execute(
-                Portfolio.__table__.select().where(
+                select(Portfolio).where(
                     Portfolio.user_id == user_id,
                     Portfolio.portfolio_name == portfolio_name,
                     Portfolio.is_active == True
                 )
             )
-            portfolio = result.scalar()
+            portfolio = result.scalar_one_or_none()
             if portfolio:
                 portfolio.holdings = holdings
                 portfolio.updated_at = datetime.now()
@@ -370,14 +370,23 @@ class DatabaseManager:
     async def get_cached_stock_data(self, symbol: str, data_type: str):
         async with self.async_session() as session:
             result = await session.execute(
-                StockData.__table__.select().where(
+                select(StockData).where(
                     StockData.symbol == symbol,
                     StockData.data_type == data_type,
                     StockData.expires_at > datetime.now()
                 )
             )
-            stock_data = result.first()
+            stock_data = result.scalar_one_or_none()
             return stock_data.data if stock_data else None
 
 # Global database manager instance
 db_manager = DatabaseManager()
+
+    
+# Provide a convenience init function expected by main.py
+async def init_db():
+    """Initialize database tables (convenience wrapper)"""
+    await create_tables()
+
+# Backwards-compatible: attach init_db method to db_manager instance
+setattr(db_manager, 'init_db', init_db)
