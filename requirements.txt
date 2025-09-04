@@ -3,4 +3,3 @@ autogen-agentchat
 autogenstudio
 autogen-ext
 autogen-core
-google-generativeai

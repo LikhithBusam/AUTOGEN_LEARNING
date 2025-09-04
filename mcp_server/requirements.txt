@@ -1,0 +1,59 @@
+# Core AutoGen and MCP
+autogen-agentchat==0.7.4
+autogen-core==0.7.4
+autogen-ext==0.7.4
+mcp==1.13.1
+
+# Financial Data APIs
+yfinance==0.2.65
+alpha-vantage==2.3.1
+pandas-datareader==0.10.0
+
+# Data Processing
+pandas==2.3.2
+numpy==2.3.2
+scipy==1.16.1
+
+# Visualization
+matplotlib==3.10.5
+plotly==6.3.0
+seaborn==0.13.2
+
+# Report Generation
+reportlab==4.4.3
+jinja2==3.1.6
+weasyprint==62.3
+
+# Sentiment Analysis
+transformers==4.54.0
+torch==2.8.0
+textblob==0.18.0
+vaderSentiment==3.3.2
+
+# News APIs
+newsapi-python==0.2.7
+tweepy==4.14.0
+
+# Database
+sqlalchemy==2.0.41
+
+# Web Framework (for API endpoints)
+fastapi==0.116.1
+uvicorn==0.35.0
+
+# Environment Management
+python-dotenv==1.1.1
+
+# HTTP Requests
+requests==2.32.5
+aiohttp==3.12.14
+
+# Scientific Computing
+scikit-learn==1.7.1
+
+# Date/Time Processing
+python-dateutil==2.9.0.post0
+
+# Configuration
+pydantic==2.11.7
+pydantic-settings==2.10.1
