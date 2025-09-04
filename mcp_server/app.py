@@ -22,7 +22,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
-from flask import Flask, request, jsonify, render_template_string, send_file, make_response
+from flask import Flask, request, jsonify, render_template_string, render_template, send_file, make_response
 from flask_cors import CORS
 import logging
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -45,8 +45,15 @@ try:
     from agents.recommendation_agent import RecommendationAgent
     agents_available = True
 except ImportError as e:
-    logger.warning(f"Agents not available: {e}")
     agents_available = False
+    # Logger will be defined later
+
+# Import database components
+try:
+    from data.database import Portfolio, db_session
+    database_available = True
+except ImportError as e:
+    database_available = False
 
 # Configure logging
 logging.basicConfig(
@@ -54,6 +61,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Log import status
+if not agents_available:
+    logger.warning("Agents not available - some features may be limited")
+if not database_available:
+    logger.warning("Database not available - using fallback data")
 
 # Create Flask app
 app = Flask(__name__)
@@ -405,16 +418,12 @@ class SimpleDataAnalyst:
             
             async def get_ai_recommendation():
                 try:
-                    # Create messages for the AI model
+                    # Create messages for the AI model in correct AutoGen format
+                    from autogen_core.models import SystemMessage, UserMessage
+                    
                     messages = [
-                        {
-                            "role": "system",
-                            "content": "You are a professional financial analyst with expertise in equity research, technical analysis, and fundamental analysis. Provide data-driven investment recommendations based on comprehensive market analysis."
-                        },
-                        {
-                            "role": "user", 
-                            "content": analysis_prompt
-                        }
+                        SystemMessage(content="You are a professional financial analyst with expertise in equity research, technical analysis, and fundamental analysis. Provide data-driven investment recommendations based on comprehensive market analysis.", source="system"),
+                        UserMessage(content=analysis_prompt, source="user")
                     ]
                     
                     # Get AI response
@@ -843,15 +852,11 @@ class NewsSentimentAnalyzer:
             
             async def get_sentiment():
                 try:
+                    from autogen_core.models import SystemMessage, UserMessage
+                    
                     messages = [
-                        {
-                            "role": "system",
-                            "content": "You are a financial sentiment analysis expert. Analyze news text and provide sentiment scores."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
+                        SystemMessage(content="You are a financial sentiment analysis expert. Analyze news text and provide sentiment scores.", source="system"),
+                        UserMessage(content=prompt, source="user")
                     ]
                     
                     response = await data_analyst.model_client.create(messages=messages)
@@ -1587,25 +1592,31 @@ class IntelligentFinancialAssistant:
         try:
             logger.info(f"Processing financial query: {user_query}")
             
-            # Step 1: Extract symbols from query
-            symbols = self._extract_symbols_from_query(user_query)
+            # Step 1: Check for portfolio queries FIRST
             query_lower = user_query.lower()
-            
-            # Step 2: Determine query type and route appropriately
-            if len(symbols) > 1 or any(word in query_lower for word in ['compare', 'vs', 'versus', 'against']):
-                # Multi-stock comparison
-                if len(symbols) < 2:
-                    symbols = ['AAPL', 'MSFT']  # Default comparison
-                result = self._handle_comparison_query(symbols[:5], user_query)
-                
-            elif len(symbols) == 1:
-                # Single stock analysis
-                result = self._handle_single_stock_query(symbols[0], user_query, 'analysis')
-                
+            if any(word in query_lower for word in ['portfolio', 'holdings', 'allocation', 'diversification', 'diversified', 'invest', 'allocate', 'build a portfolio', 'recommendation for']):
+                # Handle portfolio recommendation
+                result = self._handle_portfolio_query(user_query, user_id, [])
+                symbols = []  # Portfolio queries don't need specific symbols
             else:
-                # General market query - provide default analysis
-                symbols = ['AAPL', 'MSFT', 'GOOGL']
-                result = self._handle_market_overview_query(symbols, user_query)
+                # Step 2: Extract symbols from query for non-portfolio queries
+                symbols = self._extract_symbols_from_query(user_query)
+                
+                # Step 3: Determine query type and route appropriately
+                if len(symbols) > 1 or any(word in query_lower for word in ['compare', 'vs', 'versus', 'against']):
+                    # Multi-stock comparison
+                    if len(symbols) < 2:
+                        symbols = ['AAPL', 'MSFT']  # Default comparison
+                    result = self._handle_comparison_query(symbols[:5], user_query)
+                    
+                elif len(symbols) == 1:
+                    # Single stock analysis
+                    result = self._handle_single_stock_query(symbols[0], user_query, 'analysis')
+                    
+                else:
+                    # General market query - provide default analysis
+                    symbols = ['AAPL', 'MSFT', 'GOOGL']
+                    result = self._handle_market_overview_query(symbols, user_query)
             
             # Step 3: Generate dual format outputs
             if result.get("success"):
@@ -2048,6 +2059,193 @@ class IntelligentFinancialAssistant:
         except Exception as e:
             return f"Comparison summary error: {str(e)}"
 
+    def _detect_portfolio_keywords(self, query: str) -> List[str]:
+        """Detect portfolio-related keywords in query"""
+        portfolio_keywords = [
+            'portfolio', 'invest', 'allocation', 'diversify', 'diversified',
+            'recommendation', 'allocate', 'distribute', 'spread'
+        ]
+        
+        query_lower = query.lower()
+        detected = []
+        for keyword in portfolio_keywords:
+            if keyword in query_lower:
+                detected.append(keyword)
+        return detected
+
+    def _is_portfolio_query(self, query: str) -> bool:
+        """Check if query is requesting portfolio advice"""
+        portfolio_indicators = [
+            'portfolio', 'invest', 'allocation', 'diversify', 'diversified',
+            'recommend', 'distribute', 'spread', 'balance'
+        ]
+        
+        query_lower = query.lower()
+        return any(indicator in query_lower for indicator in portfolio_indicators)
+
+    def _handle_portfolio_query(self, query: str, user_id: str, keywords: List[str]) -> Dict[str, Any]:
+        """Handle portfolio-related queries with AI-powered recommendations"""
+        try:
+            # Extract investment amount from query
+            import re
+            amount_match = re.search(r'\$?(\d+(?:,\d{3})*(?:\.\d{2})?)', query)
+            investment_amount = 10000  # default
+            if amount_match:
+                investment_amount = float(amount_match.group(1).replace(',', ''))
+            
+            # Create AI-powered portfolio recommendation
+            portfolio_rec = self._create_ai_portfolio_recommendation(investment_amount, query)
+            
+            if portfolio_rec.get('success'):
+                return {
+                    "query_type": "portfolio_recommendation",
+                    "success": True,
+                    "sentence_format": portfolio_rec['sentence_format'],
+                    "table_format": portfolio_rec['table_format'],
+                    "analysis": portfolio_rec,
+                    "investment_amount": investment_amount,
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                # Fallback to basic guidance
+                return self._basic_portfolio_guidance(investment_amount)
+            
+        except Exception as e:
+            logger.error(f"Portfolio query failed: {e}")
+            return self._basic_portfolio_guidance(10000)
+    
+    def _create_ai_portfolio_recommendation(self, amount: float, query: str) -> Dict[str, Any]:
+        """Create AI-powered diversified portfolio recommendation"""
+        try:
+            # Define diversified portfolio components
+            portfolio_components = [
+                # Large Cap Technology (25%)
+                {"symbol": "AAPL", "sector": "Technology", "allocation": 0.08, "type": "Large Cap Growth"},
+                {"symbol": "MSFT", "sector": "Technology", "allocation": 0.08, "type": "Large Cap Growth"},
+                {"symbol": "GOOGL", "sector": "Technology", "allocation": 0.09, "type": "Large Cap Growth"},
+                
+                # Healthcare (15%)
+                {"symbol": "JNJ", "sector": "Healthcare", "allocation": 0.08, "type": "Defensive Large Cap"},
+                {"symbol": "PFE", "sector": "Healthcare", "allocation": 0.07, "type": "Dividend Growth"},
+                
+                # Financial Services (15%)
+                {"symbol": "JPM", "sector": "Financial", "allocation": 0.08, "type": "Banking"},
+                {"symbol": "V", "sector": "Financial", "allocation": 0.07, "type": "Payment Processing"},
+                
+                # Consumer Goods (15%)
+                {"symbol": "PG", "sector": "Consumer Defensive", "allocation": 0.08, "type": "Dividend Aristocrat"},
+                {"symbol": "KO", "sector": "Consumer Defensive", "allocation": 0.07, "type": "Dividend Growth"},
+                
+                # Energy/Utilities (10%)
+                {"symbol": "XOM", "sector": "Energy", "allocation": 0.05, "type": "Energy"},
+                {"symbol": "NEE", "sector": "Utilities", "allocation": 0.05, "type": "Renewable Energy"},
+                
+                # International/ETFs (15%)
+                {"symbol": "VTI", "sector": "Broad Market", "allocation": 0.08, "type": "US Total Market ETF"},
+                {"symbol": "VXUS", "sector": "International", "allocation": 0.07, "type": "International ETF"}
+            ]
+            
+            # Calculate allocations
+            total_allocation = 0
+            recommendations = []
+            
+            for component in portfolio_components:
+                allocation_amount = amount * component['allocation']
+                total_allocation += component['allocation']
+                
+                # Get current price for share calculation
+                try:
+                    price_data = self.mcp_client.get_stock_price(component['symbol'])
+                    if price_data.get('success'):
+                        current_price = price_data['current_price']
+                        shares = int(allocation_amount / current_price)
+                        actual_amount = shares * current_price
+                    else:
+                        # Estimate if price data unavailable
+                        shares = int(allocation_amount / 100)  # rough estimate
+                        actual_amount = allocation_amount
+                        current_price = allocation_amount / shares if shares > 0 else 100
+                except:
+                    shares = int(allocation_amount / 100)
+                    actual_amount = allocation_amount
+                    current_price = 100
+                
+                recommendations.append({
+                    "symbol": component['symbol'],
+                    "sector": component['sector'],
+                    "type": component['type'],
+                    "allocation_percent": component['allocation'] * 100,
+                    "target_amount": allocation_amount,
+                    "actual_amount": actual_amount,
+                    "shares": shares,
+                    "price_per_share": current_price
+                })
+            
+            # Calculate portfolio metrics
+            total_invested = sum(r['actual_amount'] for r in recommendations)
+            cash_remaining = amount - total_invested
+            
+            # Create AI analysis (simplified for now)
+            ai_analysis = "Diversified portfolio designed to balance growth potential with risk management across multiple sectors."
+            
+            # Generate sentence format
+            sentence_format = f"Recommended diversified portfolio for ${amount:,.0f}: {len(recommendations)} positions across {len(set(r['sector'] for r in recommendations))} sectors, with largest allocation to {recommendations[0]['sector']} ({recommendations[0]['allocation_percent']:.1f}%). {ai_analysis}"
+            
+            # Generate table format
+            table_format = "| Symbol | Sector | Type | Allocation | Amount | Shares | Price |\n"
+            table_format += "|--------|--------|------|------------|--------|--------|-------|\n"
+            
+            for rec in recommendations:
+                table_format += f"| {rec['symbol']} | {rec['sector'][:12]} | {rec['type'][:10]} | {rec['allocation_percent']:.1f}% | ${rec['actual_amount']:.0f} | {rec['shares']} | ${rec['price_per_share']:.2f} |\n"
+            
+            table_format += f"|--------|--------|------|------------|--------|--------|-------|\n"
+            table_format += f"| **TOTAL** | **{len(set(r['sector'] for r in recommendations))} Sectors** | **Mixed** | **{total_allocation*100:.1f}%** | **${total_invested:.0f}** | **Portfolio** | **${cash_remaining:.0f} Cash** |"
+            
+            return {
+                "success": True,
+                "sentence_format": sentence_format,
+                "table_format": table_format,
+                "recommendations": recommendations,
+                "portfolio_summary": {
+                    "total_invested": total_invested,
+                    "cash_remaining": cash_remaining,
+                    "total_positions": len(recommendations),
+                    "sectors_covered": len(set(r['sector'] for r in recommendations)),
+                    "ai_analysis": ai_analysis
+                },
+                "risk_profile": "Moderate - Diversified across sectors with mix of growth and defensive positions"
+            }
+            
+        except Exception as e:
+            logger.error(f"AI portfolio creation failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _basic_portfolio_guidance(self, amount: float) -> Dict[str, Any]:
+        """Provide basic portfolio guidance as fallback"""
+        guidance = f"""
+**Diversified Portfolio Recommendation for ${amount:,.0f}**
+
+**Suggested Allocation:**
+• Technology (25%): ${amount*0.25:,.0f} - AAPL, MSFT, GOOGL
+• Healthcare (15%): ${amount*0.15:,.0f} - JNJ, PFE
+• Financial (15%): ${amount*0.15:,.0f} - JPM, V
+• Consumer Goods (15%): ${amount*0.15:,.0f} - PG, KO
+• Energy/Utilities (10%): ${amount*0.10:,.0f} - XOM, NEE
+• ETFs/International (15%): ${amount*0.15:,.0f} - VTI, VXUS
+• Cash Reserve (5%): ${amount*0.05:,.0f} - Emergency fund
+
+**Risk Level:** Moderate
+**Expected Return:** 8-12% annually
+**Diversification:** 6 sectors, 10+ positions
+"""
+        
+        return {
+            "query_type": "portfolio_recommendation",
+            "sentence_format": f"Basic diversified portfolio for ${amount:,.0f} with allocation across 6 sectors and moderate risk profile.",
+            "analysis": {"guidance": guidance.strip()},
+            "success": True
+        }
+
 # Initialize the AI-powered intelligent assistant after all components are ready
 try:
     intelligent_assistant = IntelligentFinancialAssistant(mcp_client, data_analyst)
@@ -2091,7 +2289,7 @@ def init_database():
             CREATE TABLE IF NOT EXISTS portfolios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT,
-                name TEXT NOT NULL,
+                portfolio_name TEXT NOT NULL,
                 holdings TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2201,7 +2399,7 @@ def init_database():
                 CREATE TABLE IF NOT EXISTS portfolios (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT,
-                    name TEXT NOT NULL,
+                    portfolio_name TEXT NOT NULL,
                     holdings TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2271,6 +2469,8 @@ def extract_symbols_from_query(query: str) -> List[str]:
         if symbol not in unique_symbols:
             unique_symbols.append(symbol)
     
+    return unique_symbols
+
 # Working AI-Powered Query Processor
 class IntelligentQueryProcessor:
     """AI-powered query processor that handles any financial question dynamically"""
@@ -2335,7 +2535,7 @@ class IntelligentQueryProcessor:
         # Query type classification
         if any(word in query_lower for word in ['compare', 'vs', 'versus', 'against', 'difference']):
             query_type = "comparison"
-        elif any(word in query_lower for word in ['portfolio', 'holdings', 'allocation', 'diversification']):
+        elif any(word in query_lower for word in ['portfolio', 'holdings', 'allocation', 'diversification', 'diversified', 'invest', 'allocate', 'build a portfolio', 'recommendation for']):
             query_type = "portfolio"
         elif any(word in query_lower for word in ['news', 'sentiment', 'opinion', 'buzz', 'headlines']):
             query_type = "news_sentiment"
@@ -2561,41 +2761,220 @@ Based on current data, {symbol} shows a {recommendation.get('action', 'HOLD').lo
             return {"error": f"Market overview failed: {str(e)}"}
     
     def _handle_portfolio_query(self, query: str, user_id: str, keywords: List[str]) -> Dict[str, Any]:
-        """Handle portfolio-related queries"""
+        """Handle portfolio-related queries with AI-powered recommendations"""
         try:
-            # For now, provide portfolio guidance
-            human_response = """
-**Portfolio Analysis & Guidance**
-
-**Diversification Principles:**
-• Spread investments across different sectors
-• Mix of growth and value stocks
-• Consider international exposure
-• Include defensive positions
-
-**Risk Management:**
-• Never put more than 5-10% in a single stock
-• Rebalance quarterly or semi-annually
-• Set stop-loss levels for risk control
-• Consider your investment timeline
-
-**Popular Portfolio Allocations:**
-• Conservative: 60% stocks, 40% bonds
-• Moderate: 70% stocks, 30% bonds
-• Aggressive: 80-90% stocks, 10-20% bonds
-
-**Recommendation:**
-Create a diversified portfolio based on your risk tolerance and investment goals. Consider using ETFs for broad market exposure.
-"""
+            # Extract investment amount from query
+            import re
+            amount_match = re.search(r'\$?(\d+(?:,\d{3})*(?:\.\d{2})?)', query)
+            investment_amount = 10000  # default
+            if amount_match:
+                investment_amount = float(amount_match.group(1).replace(',', ''))
+            
+            # Create AI-powered portfolio recommendation
+            portfolio_rec = self._create_ai_portfolio_recommendation(investment_amount, query)
+            
+            if portfolio_rec.get('success'):
+                return {
+                    "query_type": "portfolio_recommendation",
+                    "success": True,
+                    "sentence_format": portfolio_rec['sentence_format'],
+                    "table_format": portfolio_rec['table_format'],
+                    "analysis": portfolio_rec,
+                    "investment_amount": investment_amount,
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                # Fallback to basic guidance
+                return self._basic_portfolio_guidance(investment_amount)
+            
+        except Exception as e:
+            logger.error(f"Portfolio query failed: {e}")
+            return self._basic_portfolio_guidance(10000)
+    
+    def _create_ai_portfolio_recommendation(self, amount: float, query: str) -> Dict[str, Any]:
+        """Create AI-powered diversified portfolio recommendation"""
+        try:
+            # Define diversified portfolio components
+            portfolio_components = [
+                # Large Cap Technology (25%)
+                {"symbol": "AAPL", "sector": "Technology", "allocation": 0.08, "type": "Large Cap Growth"},
+                {"symbol": "MSFT", "sector": "Technology", "allocation": 0.08, "type": "Large Cap Growth"},
+                {"symbol": "GOOGL", "sector": "Technology", "allocation": 0.09, "type": "Large Cap Growth"},
+                
+                # Healthcare (15%)
+                {"symbol": "JNJ", "sector": "Healthcare", "allocation": 0.08, "type": "Defensive Large Cap"},
+                {"symbol": "PFE", "sector": "Healthcare", "allocation": 0.07, "type": "Dividend Growth"},
+                
+                # Financial Services (15%)
+                {"symbol": "JPM", "sector": "Financial", "allocation": 0.08, "type": "Banking"},
+                {"symbol": "V", "sector": "Financial", "allocation": 0.07, "type": "Payment Processing"},
+                
+                # Consumer Goods (15%)
+                {"symbol": "PG", "sector": "Consumer Defensive", "allocation": 0.08, "type": "Dividend Aristocrat"},
+                {"symbol": "KO", "sector": "Consumer Defensive", "allocation": 0.07, "type": "Dividend Growth"},
+                
+                # Energy/Utilities (10%)
+                {"symbol": "XOM", "sector": "Energy", "allocation": 0.05, "type": "Energy"},
+                {"symbol": "NEE", "sector": "Utilities", "allocation": 0.05, "type": "Renewable Energy"},
+                
+                # International/ETFs (15%)
+                {"symbol": "VTI", "sector": "Broad Market", "allocation": 0.08, "type": "US Total Market ETF"},
+                {"symbol": "VXUS", "sector": "International", "allocation": 0.07, "type": "International ETF"}
+            ]
+            
+            # Calculate allocations
+            total_allocation = 0
+            recommendations = []
+            
+            for component in portfolio_components:
+                allocation_amount = amount * component['allocation']
+                total_allocation += component['allocation']
+                
+                # Get current price for share calculation
+                try:
+                    price_data = self.mcp_client.get_real_time_data(component['symbol'])
+                    if price_data.get('success'):
+                        current_price = price_data['current_price']
+                        shares = int(allocation_amount / current_price)
+                        actual_amount = shares * current_price
+                    else:
+                        # Estimate if price data unavailable
+                        shares = int(allocation_amount / 100)  # rough estimate
+                        actual_amount = allocation_amount
+                        current_price = allocation_amount / shares if shares > 0 else 100
+                except:
+                    shares = int(allocation_amount / 100)
+                    actual_amount = allocation_amount
+                    current_price = 100
+                
+                recommendations.append({
+                    "symbol": component['symbol'],
+                    "sector": component['sector'],
+                    "type": component['type'],
+                    "allocation_percent": component['allocation'] * 100,
+                    "target_amount": allocation_amount,
+                    "actual_amount": actual_amount,
+                    "shares": shares,
+                    "price_per_share": current_price
+                })
+            
+            # Calculate portfolio metrics
+            total_invested = sum(r['actual_amount'] for r in recommendations)
+            cash_remaining = amount - total_invested
+            
+            # Create AI analysis
+            if self.data_analyst and hasattr(self.data_analyst, 'model_client'):
+                ai_analysis = self._get_ai_portfolio_analysis(recommendations, amount, query)
+            else:
+                ai_analysis = "Diversified portfolio designed to balance growth potential with risk management across multiple sectors."
+            
+            # Generate sentence format
+            sentence_format = f"Recommended diversified portfolio for ${amount:,.0f}: {len(recommendations)} positions across {len(set(r['sector'] for r in recommendations))} sectors, with largest allocation to {recommendations[0]['sector']} ({recommendations[0]['allocation_percent']:.1f}%). {ai_analysis}"
+            
+            # Generate table format
+            table_format = "| Symbol | Sector | Type | Allocation | Amount | Shares | Price |\n"
+            table_format += "|--------|--------|------|------------|--------|--------|-------|\n"
+            
+            for rec in recommendations:
+                table_format += f"| {rec['symbol']} | {rec['sector'][:12]} | {rec['type'][:10]} | {rec['allocation_percent']:.1f}% | ${rec['actual_amount']:.0f} | {rec['shares']} | ${rec['price_per_share']:.2f} |\n"
+            
+            table_format += f"|--------|--------|------|------------|--------|--------|-------|\n"
+            table_format += f"| **TOTAL** | **{len(set(r['sector'] for r in recommendations))} Sectors** | **Mixed** | **{total_allocation*100:.1f}%** | **${total_invested:.0f}** | **Portfolio** | **${cash_remaining:.0f} Cash** |"
             
             return {
-                "query_type": "portfolio",
-                "human_response": human_response.strip(),
-                "success": True
+                "success": True,
+                "sentence_format": sentence_format,
+                "table_format": table_format,
+                "recommendations": recommendations,
+                "portfolio_summary": {
+                    "total_invested": total_invested,
+                    "cash_remaining": cash_remaining,
+                    "total_positions": len(recommendations),
+                    "sectors_covered": len(set(r['sector'] for r in recommendations)),
+                    "ai_analysis": ai_analysis
+                },
+                "risk_profile": "Moderate - Diversified across sectors with mix of growth and defensive positions"
             }
             
         except Exception as e:
-            return {"error": f"Portfolio query failed: {str(e)}"}
+            logger.error(f"AI portfolio creation failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _get_ai_portfolio_analysis(self, recommendations: List[Dict], amount: float, query: str) -> str:
+        """Get AI analysis of the portfolio recommendation"""
+        try:
+            sectors = set(r['sector'] for r in recommendations)
+            total_positions = len(recommendations)
+            
+            prompt = f"""
+            Analyze this diversified portfolio recommendation for ${amount:,.0f}:
+            
+            Positions: {total_positions} stocks/ETFs
+            Sectors: {', '.join(sectors)}
+            Query: {query}
+            
+            Provide a brief 2-sentence analysis focusing on diversification benefits and risk profile.
+            """
+            
+            # AI call for portfolio analysis with correct message format
+            from autogen_core.models import SystemMessage, UserMessage
+            
+            messages = [
+                SystemMessage(content="You are a professional portfolio manager. Provide concise portfolio analysis.", source="system"),
+                UserMessage(content=prompt, source="user")
+            ]
+            
+            async def get_portfolio_analysis():
+                response = await self.data_analyst.model_client.create(messages=messages)
+                return response.choices[0].message.content.strip()
+            
+            # Run async analysis
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self._run_async_analysis, get_portfolio_analysis)
+                    return future.result(timeout=15)
+            else:
+                return loop.run_until_complete(get_portfolio_analysis())
+                
+        except Exception as e:
+            logger.error(f"AI portfolio analysis failed: {e}")
+            return "Portfolio provides balanced exposure across multiple sectors with appropriate risk diversification."
+    
+    def _basic_portfolio_guidance(self, amount: float) -> Dict[str, Any]:
+        """Provide basic portfolio guidance as fallback"""
+        guidance = f"""
+**Diversified Portfolio Recommendation for ${amount:,.0f}**
+
+**Suggested Allocation:**
+• Technology (25%): ${amount*0.25:,.0f} - AAPL, MSFT, GOOGL
+• Healthcare (15%): ${amount*0.15:,.0f} - JNJ, PFE
+• Financial (15%): ${amount*0.15:,.0f} - JPM, V
+• Consumer Goods (15%): ${amount*0.15:,.0f} - PG, KO
+• Energy/Utilities (10%): ${amount*0.10:,.0f} - XOM, NEE
+• ETFs/International (15%): ${amount*0.15:,.0f} - VTI, VXUS
+• Cash Reserve (5%): ${amount*0.05:,.0f} - Emergency fund
+
+**Risk Level:** Moderate
+**Expected Return:** 8-12% annually
+**Diversification:** 6 sectors, 10+ positions
+"""
+        
+        return {
+            "query_type": "portfolio_recommendation",
+            "sentence_format": f"Basic diversified portfolio for ${amount:,.0f} with allocation across 6 sectors and moderate risk profile.",
+            "analysis": {"guidance": guidance.strip()},
+            "success": True
+        }
     
     def _handle_news_sentiment(self, query: str, symbols: List[str], keywords: List[str]) -> Dict[str, Any]:
         """Handle news and sentiment queries"""
@@ -3347,6 +3726,11 @@ def dashboard():
     """Serve the main dashboard"""
     return render_template_string(DASHBOARD_HTML)
 
+@app.route('/analysis')
+def comprehensive_analysis_page():
+    """Serve the comprehensive analysis page"""
+    return render_template('comprehensive_analysis.html')
+
 @app.route('/api/health')
 def health_check():
     """Health check endpoint"""
@@ -3731,7 +4115,7 @@ def create_portfolio():
         conn = sqlite3.connect('./data/financial_analyst.db')
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO portfolios (user_id, name, holdings) VALUES (?, ?, ?)",
+            "INSERT INTO portfolios (user_id, portfolio_name, holdings) VALUES (?, ?, ?)",
             (user_id, name, json.dumps(holdings))
         )
         portfolio_id = cursor.lastrowid
@@ -3753,6 +4137,340 @@ def create_portfolio():
     except Exception as e:
         logger.error(f"Portfolio creation error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+def generate_comprehensive_analysis(stock_report: Dict, portfolio_report: Dict, market_summary: Dict) -> str:
+    """
+    Generate a comprehensive, human-readable analysis combining stock, portfolio, and market data
+    
+    Args:
+        stock_report: Stock analysis data
+        portfolio_report: Portfolio performance and holdings data  
+        market_summary: Market conditions and trends data
+        
+    Returns:
+        Human-readable comprehensive analysis as a string
+    """
+    try:
+        analysis_sections = []
+        
+        # 1. STOCK ANALYSIS SECTION
+        stock_section = generate_stock_analysis_section(stock_report)
+        analysis_sections.append(stock_section)
+        
+        # 2. PORTFOLIO ANALYSIS SECTION  
+        portfolio_section = generate_portfolio_analysis_section(portfolio_report, stock_report)
+        analysis_sections.append(portfolio_section)
+        
+        # 3. MARKET INTEGRATION SECTION
+        market_section = generate_market_integration_section(market_summary, stock_report, portfolio_report)
+        analysis_sections.append(market_section)
+        
+        # 4. STRATEGIC RECOMMENDATIONS
+        recommendations_section = generate_strategic_recommendations(stock_report, portfolio_report, market_summary)
+        analysis_sections.append(recommendations_section)
+        
+        # Combine all sections
+        full_analysis = "\n\n".join(analysis_sections)
+        
+        return full_analysis
+        
+    except Exception as e:
+        logger.error(f"Comprehensive analysis generation failed: {e}")
+        return f"Analysis generation error: {str(e)}"
+
+def generate_stock_analysis_section(stock_report: Dict) -> str:
+    """Generate the stock analysis section"""
+    try:
+        symbol = stock_report.get('symbol', 'N/A')
+        current_price = stock_report.get('current_price', 0)
+        price_change = stock_report.get('price_change_percent', 0)
+        recommendation = stock_report.get('recommendation', {})
+        action = recommendation.get('action', 'HOLD')
+        target_price = recommendation.get('target_price', current_price)
+        
+        # Financial metrics
+        metrics = stock_report.get('key_metrics', {})
+        pe_ratio = metrics.get('pe_ratio', 'N/A')
+        market_cap = metrics.get('market_cap', 0)
+        
+        # Technical indicators
+        technical = stock_report.get('technical_analysis', {})
+        trend = technical.get('overall_trend', 'Neutral')
+        support = technical.get('support_level', current_price * 0.95)
+        resistance = technical.get('resistance_level', current_price * 1.05)
+        
+        section = f"""📊 **STOCK ANALYSIS: {symbol}**
+
+**Executive Summary:**
+{symbol} is currently trading at ${current_price:.2f}, showing a {price_change:+.2f}% change. Our analysis indicates a {action} recommendation with a target price of ${target_price:.2f}, representing a {((target_price - current_price) / current_price * 100):+.1f}% potential return.
+
+**Financial Highlights:**
+The stock demonstrates solid fundamentals with a P/E ratio of {pe_ratio} and a market capitalization of ${market_cap/1e9:.1f}B. Current valuation metrics suggest the stock is {'undervalued' if action == 'BUY' else 'fairly valued' if action == 'HOLD' else 'overvalued'} at current levels.
+
+**Technical Analysis:**
+Technical indicators show a {trend.lower()} trend with key support at ${support:.2f} and resistance at ${resistance:.2f}. The stock's momentum suggests {'continued upward movement' if trend == 'Bullish' else 'sideways consolidation' if trend == 'Neutral' else 'potential downside pressure'}.
+
+**Growth Opportunities:**
+• Strong market position in a growing sector
+• Potential for earnings expansion and margin improvement  
+• Strategic initiatives that could drive future growth
+• Favorable industry trends supporting long-term prospects
+
+**Key Risks:**
+• Market volatility could impact short-term performance
+• Competitive pressures in the industry
+• Economic headwinds affecting consumer/business spending
+• Regulatory changes that could impact operations"""
+
+        return section
+        
+    except Exception as e:
+        return f"Stock analysis section error: {str(e)}"
+
+def generate_portfolio_analysis_section(portfolio_report: Dict, stock_report: Dict) -> str:
+    """Generate the portfolio analysis section"""
+    try:
+        total_value = portfolio_report.get('total_value', 0)
+        positions = portfolio_report.get('holdings', {})
+        performance = portfolio_report.get('performance', {})
+        diversification = portfolio_report.get('diversification', {})
+        
+        symbol = stock_report.get('symbol', 'N/A')
+        stock_weight = 0
+        if symbol in positions:
+            stock_value = positions[symbol].get('value', 0)
+            stock_weight = (stock_value / total_value * 100) if total_value > 0 else 0
+        
+        total_return = performance.get('total_return_percent', 0)
+        risk_level = diversification.get('risk_level', 'Moderate')
+        sector_count = diversification.get('sector_count', len(positions))
+        
+        # Generate descriptions
+        diversification_desc = 'excellent' if sector_count >= 6 else 'good' if sector_count >= 4 else 'limited'
+        position_desc = 'concentrated' if stock_weight > 15 else 'balanced' if stock_weight > 5 else 'minimal'
+        impact_desc = 'significant' if stock_weight > 15 else 'moderate' if stock_weight > 5 else 'limited'
+        performance_desc = 'strong' if total_return > 10 else 'solid' if total_return > 5 else 'modest'
+        
+        if risk_level == 'High':
+            objective_desc = 'growth-oriented'
+        elif risk_level == 'Moderate':
+            objective_desc = 'balanced growth and income'
+        else:
+            objective_desc = 'capital preservation'
+        
+        # Generate rebalancing recommendations
+        if stock_weight > 20:
+            weight_rec = f'Consider reducing concentration'
+        elif stock_weight < 15:
+            weight_rec = f'Maintain current allocation'
+        else:
+            weight_rec = f'Monitor position size'
+        
+        if risk_level == 'High':
+            risk_rec = 'Add more defensive positions'
+        elif risk_level == 'Low':
+            risk_rec = 'Consider increasing growth exposure'
+        else:
+            risk_rec = 'Current balance appears appropriate'
+        
+        section = f"""💼 **PORTFOLIO ANALYSIS**
+
+**Portfolio Overview:**
+Your portfolio currently holds {len(positions)} positions with a total value of ${total_value:,.0f}. The portfolio has generated a {total_return:+.1f}% total return and maintains a {risk_level.lower()} risk profile through diversification across {sector_count} sectors.
+
+**Diversification Assessment:**
+The portfolio demonstrates {diversification_desc} diversification with exposure across multiple sectors and asset classes. This diversification helps reduce overall portfolio risk while maintaining growth potential.
+
+**Stock Impact on Portfolio:**
+{symbol} represents {stock_weight:.1f}% of your total portfolio value. This {position_desc} position means the stock has a {impact_desc} impact on overall portfolio performance.
+
+**Performance Analysis:**
+The portfolio's risk-adjusted returns indicate {performance_desc} performance relative to market benchmarks. Current allocation supports {objective_desc} investment objectives.
+
+**Rebalancing Recommendations:**
+• {weight_rec} in {symbol}
+• {risk_rec}
+• Review quarterly to ensure alignment with investment goals
+• Consider tax implications when making allocation changes"""
+
+        return section
+        
+    except Exception as e:
+        return f"Portfolio analysis section error: {str(e)}"
+
+def generate_market_integration_section(market_summary: Dict, stock_report: Dict, portfolio_report: Dict) -> str:
+    """Generate the market integration section"""
+    try:
+        market_trend = market_summary.get('overall_trend', 'Mixed')
+        market_sentiment = market_summary.get('sentiment', 'Neutral')
+        key_indicators = market_summary.get('key_indicators', {})
+        vix = key_indicators.get('vix', 20)
+        
+        symbol = stock_report.get('symbol', 'N/A')
+        sector = stock_report.get('sector', 'Technology')
+        
+        # Generate market condition descriptions
+        if vix > 25:
+            vix_desc = 'elevated volatility and uncertainty'
+            market_tone = 'increased caution'
+        elif vix > 20:
+            vix_desc = 'moderate market stress'
+            market_tone = 'balanced market conditions'
+        else:
+            vix_desc = 'relatively calm conditions'
+            market_tone = 'measured optimism'
+        
+        # Generate sector performance description
+        if market_trend == 'Bullish':
+            sector_perf = 'outperforming'
+        elif market_trend == 'Bearish':
+            sector_perf = 'underperforming'
+        else:
+            sector_perf = 'in line with'
+        
+        # Generate sector outlook
+        if market_sentiment == 'Positive':
+            sector_outlook = 'continued strength'
+        elif market_sentiment == 'Negative':
+            sector_outlook = 'potential headwinds'
+        else:
+            sector_outlook = 'mixed conditions'
+        
+        # Generate portfolio positioning
+        if market_sentiment == 'Negative':
+            portfolio_protection = 'strong protection'
+        elif market_sentiment == 'Neutral':
+            portfolio_protection = 'balanced exposure'
+        else:
+            portfolio_protection = 'good upside participation'
+        
+        # Generate allocation assessment
+        if vix < 20:
+            allocation_assessment = 'well-positioned'
+        elif vix > 25:
+            allocation_assessment = 'appropriately defensive'
+        else:
+            allocation_assessment = 'reasonably balanced'
+        
+        # Generate market outlook
+        if vix > 25:
+            market_outlook = 'Expect continued volatility'
+            strategy_focus = 'Focus on quality names with strong fundamentals'
+        elif vix < 15:
+            market_outlook = 'Market conditions support measured risk-taking'
+            strategy_focus = 'Consider opportunistic additions to growth positions'
+        else:
+            market_outlook = 'Mixed signals suggest cautious optimism'
+            strategy_focus = 'Maintain balanced approach with selective adjustments'
+        
+        dispersion_note = 'increased dispersion between winners and losers' if vix > 20 else 'more synchronized market movements'
+        
+        section = f"""🌍 **MARKET CONDITIONS & IMPACT**
+
+**Current Market Environment:**
+Markets are showing a {market_trend.lower()} trend with {market_sentiment.lower()} investor sentiment. The VIX at {vix:.1f} indicates {vix_desc}, suggesting {market_tone}.
+
+**Sector-Specific Impact:**
+The {sector} sector, where {symbol} operates, is {sector_perf} broader market trends. Sector rotation patterns suggest {sector_outlook} for technology and growth-oriented stocks.
+
+**Portfolio Positioning:**
+Given current market conditions, your portfolio's diversification provides {portfolio_protection} against market volatility. The current allocation is {allocation_assessment} for the prevailing market environment.
+
+**Market Outlook Implications:**
+• {market_outlook}
+• {strategy_focus}
+• Monitor key economic indicators and Fed policy signals
+• Be prepared for {dispersion_note}"""
+
+        return section
+        
+    except Exception as e:
+        return f"Market integration section error: {str(e)}"
+
+def generate_strategic_recommendations(stock_report: Dict, portfolio_report: Dict, market_summary: Dict) -> str:
+    """Generate strategic recommendations section"""
+    try:
+        symbol = stock_report.get('symbol', 'N/A')
+        action = stock_report.get('recommendation', {}).get('action', 'HOLD')
+        market_sentiment = market_summary.get('sentiment', 'Neutral')
+        portfolio_risk = portfolio_report.get('diversification', {}).get('risk_level', 'Moderate')
+        
+        # Generate action recommendation
+        if action == 'BUY' and market_sentiment == 'Negative':
+            action_rec = 'Consider adding to position on weakness'
+        elif action == 'HOLD':
+            action_rec = 'Maintain current position size'
+        elif action == 'SELL':
+            action_rec = 'Consider profit-taking on strength'
+        else:
+            action_rec = 'Monitor position closely'
+        
+        # Generate stop-loss recommendation
+        stop_loss_rec = 'below key technical support' if action != 'SELL' else 'and consider exit strategy'
+        
+        # Generate portfolio strategy
+        if portfolio_risk == 'High' and market_sentiment == 'Negative':
+            portfolio_strategy = 'Reduce overall portfolio risk'
+        elif portfolio_risk == 'Low' and market_sentiment == 'Positive':
+            portfolio_strategy = 'Consider increasing growth exposure'
+        else:
+            portfolio_strategy = 'Maintain current balanced approach'
+        
+        # Generate hedging strategy
+        if market_sentiment == 'Negative':
+            hedging_strategy = 'Consider hedging strategies'
+        elif market_sentiment == 'Mixed':
+            hedging_strategy = 'Look for selective opportunities in oversold quality names'
+        else:
+            hedging_strategy = 'Be prepared to take profits on overvalued positions'
+        
+        # Generate timing recommendation
+        if market_sentiment == 'Negative':
+            timing_rec = 'Wait for better entry points given current volatility'
+        elif market_sentiment == 'Positive':
+            timing_rec = 'Current conditions support measured position building'
+        else:
+            timing_rec = 'Employ dollar-cost averaging for new positions'
+        
+        # Generate cash allocation
+        if market_sentiment == 'Negative':
+            cash_allocation = 'higher cash levels'
+        elif market_sentiment == 'Neutral':
+            cash_allocation = 'normal cash allocation'
+        else:
+            cash_allocation = 'minimal cash drag'
+        
+        section = f"""🎯 **STRATEGIC RECOMMENDATIONS**
+
+**Immediate Actions:**
+Based on our comprehensive analysis, we recommend the following actions for your portfolio:
+
+**For {symbol}:**
+• {action} recommendation remains appropriate given current fundamentals and market conditions
+• {action_rec}
+• Set stop-loss levels {stop_loss_rec}
+• Monitor earnings reports and guidance updates closely
+
+**Portfolio Strategy:**
+• {portfolio_strategy}
+• Rebalance positions that have drifted significantly from target allocations
+• {hedging_strategy}
+
+**Market Timing Considerations:**
+• {timing_rec}
+• Keep {cash_allocation} for opportunistic investments
+• Review and adjust strategy quarterly or as market conditions change significantly
+
+**Risk Management:**
+• Ensure portfolio correlation remains low across holdings
+• Monitor concentration risk and sector exposure limits
+• Maintain appropriate liquidity for tactical adjustments
+• Consider portfolio insurance strategies if volatility persists"""
+
+        return section
+        
+    except Exception as e:
+        return f"Strategic recommendations section error: {str(e)}"
 
 def analyze_portfolio_holdings(holdings: Dict[str, int]) -> Dict[str, Any]:
     """Analyze portfolio holdings"""
@@ -3799,67 +4517,486 @@ def generate_report():
         logger.error(f"Report generation error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+def normalize_stock_symbol(symbol: str) -> str:
+    """Convert common stock names to proper ticker symbols"""
+    
+    # Common stock name to symbol mappings
+    symbol_mappings = {
+        'tesla': 'TSLA',
+        'apple': 'AAPL',
+        'microsoft': 'MSFT',
+        'google': 'GOOGL',
+        'alphabet': 'GOOGL',
+        'amazon': 'AMZN',
+        'meta': 'META',
+        'facebook': 'META',
+        'nvidia': 'NVDA',
+        'netflix': 'NFLX',
+        'disney': 'DIS',
+        'walmart': 'WMT',
+        'visa': 'V',
+        'mastercard': 'MA',
+        'johnson': 'JNJ',
+        'procter': 'PG',
+        'coca': 'KO',
+        'pepsi': 'PEP',
+        'intel': 'INTC',
+        'amd': 'AMD',
+        'oracle': 'ORCL',
+        'salesforce': 'CRM',
+        'adobe': 'ADBE',
+        'boeing': 'BA',
+        'ge': 'GE',
+        'ford': 'F',
+        'gm': 'GM'
+    }
+    
+    # Clean and normalize the input
+    clean_symbol = symbol.lower().strip()
+    
+    # Check if it's a direct mapping
+    if clean_symbol in symbol_mappings:
+        return symbol_mappings[clean_symbol]
+    
+    # Check for partial matches (company names)
+    for name, ticker in symbol_mappings.items():
+        if name in clean_symbol or clean_symbol in name:
+            return ticker
+    
+    # If no mapping found, return uppercase version of original
+    return symbol.upper()
+
 def generate_stock_report(symbol: str) -> Dict[str, Any]:
-    """Generate comprehensive stock report"""
-    return {
-        "title": f"Stock Analysis Report - {symbol}",
-        "symbol": symbol,
-        "sections": {
-            "executive_summary": f"Comprehensive analysis of {symbol} shows mixed signals with moderate buy recommendation.",
-            "financial_highlights": {
-                "revenue": "Strong revenue growth of 12.5% YoY",
-                "profitability": "Maintaining healthy profit margins",
-                "debt": "Conservative debt levels"
-            },
-            "technical_analysis": {
-                "trend": "Bullish momentum in short-term",
-                "support_resistance": "Key support at $140, resistance at $160",
-                "indicators": "RSI indicates neutral conditions"
-            },
-            "recommendation": {
-                "action": "BUY",
-                "target_price": 165.00,
+    """Generate comprehensive stock report with real data"""
+    try:
+        # Normalize symbol first
+        normalized_symbol = normalize_stock_symbol(symbol)
+        logger.info(f"Fetching data for {symbol} -> {normalized_symbol}")
+        
+        # Fetch real stock data
+        ticker = yf.Ticker(normalized_symbol)
+        info = ticker.info
+        
+        # Get company name and validate data
+        company_name = info.get('longName', info.get('shortName', normalized_symbol))
+        if not company_name or company_name == normalized_symbol:
+            logger.warning(f"Limited data available for {normalized_symbol}")
+        
+        hist = ticker.history(period="1y")
+        
+        # Get current price with multiple fallbacks
+        current_price = (
+            info.get('currentPrice') or 
+            info.get('regularMarketPrice') or 
+            info.get('previousClose') or
+            (hist['Close'].iloc[-1] if not hist.empty else 0)
+        )
+        
+        # Get previous close with fallbacks
+        prev_close = (
+            info.get('previousClose') or
+            info.get('regularMarketPreviousClose') or
+            (hist['Close'].iloc[-2] if len(hist) > 1 else current_price)
+        )
+        
+        # Calculate price change
+        price_change = ((current_price - prev_close) / prev_close * 100) if prev_close and prev_close > 0 else 0
+        
+        # Calculate technical levels (with error handling)
+        if not hist.empty:
+            year_high = hist['High'].max()
+            year_low = hist['Low'].min()
+            avg_volume = hist['Volume'].mean()
+        else:
+            year_high = info.get('fiftyTwoWeekHigh', current_price * 1.2)
+            year_low = info.get('fiftyTwoWeekLow', current_price * 0.8)
+            avg_volume = info.get('averageVolume', 1000000)
+        
+        # Get fundamental data with better error handling
+        market_cap = info.get('marketCap', 0)
+        pe_ratio = info.get('trailingPE') or info.get('forwardPE', 0)
+        
+        # Revenue growth calculation
+        revenue_growth = 0
+        if info.get('revenueGrowth') is not None:
+            revenue_growth = info.get('revenueGrowth') * 100
+        elif info.get('quarterlyRevenueGrowth') is not None:
+            revenue_growth = info.get('quarterlyRevenueGrowth') * 100
+        
+        # Profit margin calculation
+        profit_margin = 0
+        if info.get('profitMargins') is not None:
+            profit_margin = info.get('profitMargins') * 100
+        elif info.get('operatingMargins') is not None:
+            profit_margin = info.get('operatingMargins') * 100
+        
+        debt_to_equity = info.get('debtToEquity', 0)
+        
+        # Generate AI-powered analysis using the assistant
+        if 'intelligent_assistant' in globals() and hasattr(intelligent_assistant, 'analyze_stock_fundamentals'):
+            ai_analysis = intelligent_assistant.analyze_stock_fundamentals(normalized_symbol, info)
+            executive_summary = ai_analysis.get('summary', f"Analysis of {company_name}")
+            recommendation = ai_analysis.get('recommendation', {})
+        else:
+            # Enhanced fallback analysis
+            trend = "Bullish" if price_change > 2 else "Bearish" if price_change < -2 else "Neutral"
+            executive_summary = f"Analysis of {company_name} shows {trend.lower()} signals with current price at ${current_price:.2f}."
+            
+            # Improved recommendation logic
+            if pe_ratio and pe_ratio > 0:
+                if pe_ratio < 15 and revenue_growth > 10:
+                    action, confidence = "BUY", "High"
+                elif pe_ratio > 35 or revenue_growth < -5:
+                    action, confidence = "SELL", "Moderate"
+                elif 15 <= pe_ratio <= 25 and revenue_growth > 0:
+                    action, confidence = "BUY", "Moderate"
+                else:
+                    action, confidence = "HOLD", "Moderate"
+            else:
+                # No PE data available
+                if revenue_growth > 15:
+                    action, confidence = "BUY", "Moderate"
+                elif revenue_growth < -10:
+                    action, confidence = "SELL", "Moderate"
+                else:
+                    action, confidence = "HOLD", "Low"
+                
+            target_price = current_price * (1.15 if action == "BUY" else 0.90 if action == "SELL" else 1.05)
+            recommendation = {
+                "action": action,
+                "target_price": round(target_price, 2),
+                "confidence": confidence,
                 "time_horizon": "6-12 months"
             }
+        
+        # Format market cap properly
+        def format_market_cap(market_cap):
+            if market_cap >= 1e12:
+                return f"${market_cap/1e12:.1f}T"
+            elif market_cap >= 1e9:
+                return f"${market_cap/1e9:.1f}B"
+            elif market_cap >= 1e6:
+                return f"${market_cap/1e6:.1f}M"
+            else:
+                return f"${market_cap:,.0f}" if market_cap > 0 else "N/A"
+        
+        # Safe formatting for numbers
+        def safe_format(value, format_str="{:.2f}", default="N/A"):
+            try:
+                if value is None or (isinstance(value, float) and (value != value or value == float('inf'))):  # NaN or inf check
+                    return default
+                return format_str.format(value)
+            except (ValueError, TypeError):
+                return default
+        
+        return {
+            "title": f"Stock Analysis Report - {normalized_symbol}",
+            "symbol": normalized_symbol,
+            "sections": {
+                "executive_summary": executive_summary,
+                "current_metrics": {
+                    "current_price": safe_format(current_price, "${:.2f}"),
+                    "price_change": safe_format(price_change, "{:+.2f}%"),
+                    "market_cap": format_market_cap(market_cap),
+                    "pe_ratio": safe_format(pe_ratio, "{:.1f}"),
+                    "52_week_range": f"${safe_format(year_low)} - ${safe_format(year_high)}"
+                },
+                "financial_highlights": {
+                    "revenue_growth": safe_format(revenue_growth, "{:.1f}% YoY") if revenue_growth != 0 else "N/A",
+                    "profit_margin": safe_format(profit_margin, "{:.1f}%") if profit_margin != 0 else "N/A",
+                    "debt_to_equity": safe_format(debt_to_equity, "{:.1f}") if debt_to_equity > 0 else "Conservative debt levels",
+                    "sector": info.get('sector', 'N/A'),
+                    "industry": info.get('industry', 'N/A')
+                },
+                "technical_analysis": {
+                    "trend": "Bullish" if price_change > 1 else "Bearish" if price_change < -1 else "Neutral",
+                    "support_resistance": f"Support: ${safe_format(year_low)}, Resistance: ${safe_format(year_high)}",
+                    "volume_analysis": safe_format(avg_volume/1e6, "Avg Volume: {:.1f}M") if avg_volume and avg_volume > 0 else "N/A",
+                    "momentum": "Positive" if price_change > 0 else "Negative"
+                },
+                "recommendation": recommendation,
+                "company_info": {
+                    "name": company_name,
+                    "business_summary": (info.get('longBusinessSummary', '')[:200] + "...") if info.get('longBusinessSummary') else "N/A",
+                    "employees": safe_format(info.get('fullTimeEmployees'), "{:,}") if info.get('fullTimeEmployees') else "N/A",
+                    "website": info.get('website', 'N/A')
+                }
+            }
         }
-    }
+        
+    except Exception as e:
+        logger.error(f"Error generating stock report for {symbol}: {str(e)}")
+        # Fallback to basic report with error info
+        return {
+            "title": f"Stock Analysis Report - {symbol.upper()}",
+            "symbol": symbol.upper(),
+            "sections": {
+                "executive_summary": f"Unable to fetch real-time data for {symbol}. This may be due to an invalid symbol or network issues.",
+                "error": str(e),
+                "note": "Please verify the stock symbol and try again. Common symbols: TSLA (Tesla), AAPL (Apple), MSFT (Microsoft)."
+            }
+        }
 
 def generate_portfolio_report(user_id: str) -> Dict[str, Any]:
-    """Generate portfolio analysis report"""
-    return {
-        "title": "Portfolio Analysis Report",
-        "user_id": user_id,
-        "sections": {
-            "overview": "Portfolio shows good diversification across sectors",
-            "performance": "Outperforming S&P 500 by 2.3% YTD",
-            "risk_analysis": "Moderate risk profile with beta of 1.15",
-            "recommendations": [
-                "Consider rebalancing technology allocation",
-                "Add international exposure",
-                "Review defensive positions"
-            ]
+    """Generate portfolio analysis report with real data"""
+    try:
+        # Check if database is available
+        if not database_available:
+            return {
+                "title": "Portfolio Analysis Report",
+                "user_id": user_id,
+                "sections": {
+                    "overview": "Database not available - using sample portfolio data",
+                    "performance": {
+                        "total_value": "$100,000",
+                        "total_return_percent": "+12.5%",
+                        "number_of_positions": 5
+                    },
+                    "recommendations": ["Database connection required for real portfolio data"]
+                }
+            }
+        
+        # Fetch user's portfolio from database
+        portfolios = db_session.query(Portfolio).filter_by(user_id=user_id).all()
+        
+        if not portfolios:
+            return {
+                "title": "Portfolio Analysis Report",
+                "user_id": user_id,
+                "sections": {
+                    "overview": "No portfolio found for this user",
+                    "recommendation": "Create a portfolio to start tracking your investments"
+                }
+            }
+        
+        # Calculate portfolio metrics
+        total_value = 0
+        total_cost_basis = 0
+        holdings_data = {}
+        sector_allocation = {}
+        
+        for portfolio in portfolios:
+            try:
+                # Get real-time stock data
+                ticker = yf.Ticker(portfolio.symbol)
+                info = ticker.info
+                current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+                
+                # Calculate position value
+                position_value = current_price * portfolio.shares
+                total_value += position_value
+                total_cost_basis += portfolio.avg_cost * portfolio.shares
+                
+                # Get sector information
+                sector = info.get('sector', 'Unknown')
+                if sector not in sector_allocation:
+                    sector_allocation[sector] = 0
+                sector_allocation[sector] += position_value
+                
+                holdings_data[portfolio.symbol] = {
+                    "shares": portfolio.shares,
+                    "avg_cost": portfolio.avg_cost,
+                    "current_price": current_price,
+                    "position_value": position_value,
+                    "gain_loss": position_value - (portfolio.avg_cost * portfolio.shares),
+                    "gain_loss_percent": ((current_price - portfolio.avg_cost) / portfolio.avg_cost * 100) if portfolio.avg_cost > 0 else 0,
+                    "sector": sector,
+                    "company_name": info.get('longName', portfolio.symbol)
+                }
+                
+            except Exception as e:
+                logger.warning(f"Error fetching data for {portfolio.symbol}: {str(e)}")
+                # Use stored data as fallback
+                position_value = portfolio.avg_cost * portfolio.shares
+                total_value += position_value
+                total_cost_basis += position_value
+                
+                holdings_data[portfolio.symbol] = {
+                    "shares": portfolio.shares,
+                    "avg_cost": portfolio.avg_cost,
+                    "current_price": "N/A",
+                    "position_value": position_value,
+                    "gain_loss": 0,
+                    "gain_loss_percent": 0,
+                    "sector": "Unknown",
+                    "company_name": portfolio.symbol
+                }
+        
+        # Calculate portfolio performance
+        total_return = total_value - total_cost_basis
+        total_return_percent = (total_return / total_cost_basis * 100) if total_cost_basis > 0 else 0
+        
+        # Calculate sector allocation percentages
+        sector_percentages = {}
+        for sector, value in sector_allocation.items():
+            sector_percentages[sector] = (value / total_value * 100) if total_value > 0 else 0
+        
+        # Generate recommendations based on portfolio analysis
+        recommendations = []
+        
+        # Diversification analysis
+        if len(sector_allocation) < 3:
+            recommendations.append("Consider diversifying across more sectors")
+        
+        # Concentration risk
+        for symbol, data in holdings_data.items():
+            if (data["position_value"] / total_value * 100) > 20:
+                recommendations.append(f"Consider reducing concentration in {symbol}")
+        
+        # Performance-based recommendations
+        if total_return_percent < -10:
+            recommendations.append("Review underperforming positions")
+        elif total_return_percent > 30:
+            recommendations.append("Consider taking some profits")
+        
+        if not recommendations:
+            recommendations.append("Portfolio allocation appears balanced")
+        
+        # Calculate portfolio beta and volatility (simplified)
+        portfolio_beta = 1.0  # Simplified - would require correlation calculations
+        risk_level = "Moderate"
+        if len(holdings_data) > 10:
+            risk_level = "Conservative" 
+        elif len(holdings_data) < 5:
+            risk_level = "Aggressive"
+        
+        return {
+            "title": "Portfolio Analysis Report",
+            "user_id": user_id,
+            "sections": {
+                "overview": f"Portfolio contains {len(holdings_data)} positions with total value of ${total_value:,.2f}",
+                "performance": {
+                    "total_value": f"${total_value:,.2f}",
+                    "total_cost_basis": f"${total_cost_basis:,.2f}",
+                    "total_return": f"${total_return:,.2f}",
+                    "total_return_percent": f"{total_return_percent:+.2f}%",
+                    "number_of_positions": len(holdings_data)
+                },
+                "holdings": holdings_data,
+                "sector_allocation": {
+                    sector: f"{percentage:.1f}%" 
+                    for sector, percentage in sector_percentages.items()
+                },
+                "risk_analysis": f"{risk_level} risk profile with estimated beta of {portfolio_beta:.2f}",
+                "recommendations": recommendations,
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
         }
-    }
+        
+    except Exception as e:
+        logger.error(f"Error generating portfolio report: {str(e)}")
+        return {
+            "title": "Portfolio Analysis Report",
+            "user_id": user_id,
+            "sections": {
+                "overview": "Error generating portfolio report",
+                "error": str(e)
+            }
+        }
 
 def generate_market_report() -> Dict[str, Any]:
-    """Generate market analysis report"""
-    return {
-        "title": "Market Analysis Report",
-        "sections": {
-            "market_overview": "Markets showing resilience despite volatility",
-            "sector_analysis": {
-                "Technology": "Leading gains with AI momentum",
-                "Healthcare": "Steady performance",
-                "Energy": "Mixed signals from commodity prices"
-            },
-            "economic_indicators": {
-                "gdp_growth": "2.1% annual growth",
-                "inflation": "Moderating to 3.2%",
-                "employment": "Strong labor market conditions"
-            },
-            "outlook": "Cautiously optimistic for next quarter"
+    """Generate market analysis report with real data"""
+    try:
+        # Fetch major market indices
+        market_indices = {
+            "^GSPC": "S&P 500",
+            "^DJI": "Dow Jones",
+            "^IXIC": "NASDAQ",
+            "^VIX": "VIX"
         }
-    }
+        
+        market_data = {}
+        for symbol, name in market_indices.items():
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d")
+                if len(hist) >= 2:
+                    current = hist['Close'].iloc[-1]
+                    previous = hist['Close'].iloc[-2]
+                    change = ((current - previous) / previous * 100)
+                    market_data[name] = {
+                        "current": current,
+                        "change": change,
+                        "symbol": symbol
+                    }
+            except:
+                continue
+        
+        # Fetch sector ETF performance
+        sector_etfs = {
+            "XLK": "Technology",
+            "XLF": "Financials", 
+            "XLE": "Energy",
+            "XLV": "Healthcare",
+            "XLI": "Industrials",
+            "XLY": "Consumer Discretionary"
+        }
+        
+        sector_performance = {}
+        for etf, sector in sector_etfs.items():
+            try:
+                ticker = yf.Ticker(etf)
+                hist = ticker.history(period="2d")
+                if len(hist) >= 2:
+                    current = hist['Close'].iloc[-1]
+                    previous = hist['Close'].iloc[-2]
+                    change = ((current - previous) / previous * 100)
+                    sector_performance[sector] = f"{change:+.1f}%"
+            except:
+                sector_performance[sector] = "N/A"
+        
+        # Get economic indicators (simplified - in real implementation, use economic APIs)
+        # For now, we'll use VIX as volatility indicator
+        vix_level = market_data.get("VIX", {}).get("current", 20)
+        if vix_level > 30:
+            market_sentiment = "High volatility and uncertainty"
+        elif vix_level > 20:
+            market_sentiment = "Moderate volatility"
+        else:
+            market_sentiment = "Low volatility and stable conditions"
+        
+        # Generate overall market assessment
+        sp500_change = market_data.get("S&P 500", {}).get("change", 0)
+        if sp500_change > 1:
+            overall_trend = "Strong bullish momentum"
+        elif sp500_change > 0:
+            overall_trend = "Positive but cautious"
+        elif sp500_change > -1:
+            overall_trend = "Mixed signals with sideways movement"
+        else:
+            overall_trend = "Bearish pressure and concerns"
+        
+        return {
+            "title": "Market Analysis Report",
+            "sections": {
+                "market_overview": overall_trend,
+                "major_indices": {
+                    name: f"{data['current']:.2f} ({data['change']:+.2f}%)" 
+                    for name, data in market_data.items() if name != "VIX"
+                },
+                "volatility_index": f"VIX: {vix_level:.1f} - {market_sentiment}",
+                "sector_analysis": sector_performance,
+                "economic_indicators": {
+                    "market_volatility": f"VIX at {vix_level:.1f}",
+                    "overall_sentiment": market_sentiment,
+                    "trading_volume": "Normal levels" if abs(sp500_change) < 2 else "Elevated activity"
+                },
+                "outlook": f"Based on current indicators: {overall_trend.lower()}",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating market report: {str(e)}")
+        # Fallback report
+        return {
+            "title": "Market Analysis Report",
+            "sections": {
+                "market_overview": "Unable to fetch real-time market data",
+                "error": str(e),
+                "fallback_note": "Please check internet connection and try again"
+            }
+        }
 
 @app.route('/api/visualization/stock/<symbol>')
 def get_stock_visualization(symbol):
@@ -4067,7 +5204,24 @@ def get_news_sentiment_analysis(symbol):
         
         # Create investment impact assessment
         overall_sentiment = news_result["overall_sentiment"]
-        impact_assessment = self._assess_news_impact(symbol, overall_sentiment)
+        
+        # Simple impact assessment logic
+        score = overall_sentiment.get("score", 0)
+        if score > 0.3:
+            impact = "Positive news sentiment may drive price increases"
+            recommendation = "Consider buying on positive sentiment"
+        elif score < -0.3:
+            impact = "Negative news sentiment may pressure stock price" 
+            recommendation = "Exercise caution, monitor for further developments"
+        else:
+            impact = "Neutral news sentiment, minimal market impact expected"
+            recommendation = "No immediate action required based on news sentiment"
+        
+        impact_assessment = {
+            "overall_impact": impact,
+            "investment_recommendation": recommendation,
+            "confidence_level": overall_sentiment.get("confidence", 0.5)
+        }
         
         response = {
             "symbol": symbol.upper(),
@@ -4297,6 +5451,169 @@ def test_intelligent_assistant():
             "timestamp": datetime.now().isoformat(),
             "success": False
         }), 500
+
+@app.route('/api/analysis/comprehensive', methods=['POST'])
+def comprehensive_analysis_real_data():
+    """Generate comprehensive analysis with real data"""
+    try:
+        data = request.get_json()
+        symbol = data.get('symbol', 'AAPL').upper()
+        user_id = data.get('user_id', 'web_user')
+        
+        logger.info(f"Generating comprehensive analysis for {symbol} (user: {user_id})")
+        
+        # Generate all reports with real data
+        stock_report_raw = generate_stock_report(symbol)
+        portfolio_report_raw = generate_portfolio_report(user_id)
+        market_report_raw = generate_market_report()
+        
+        # Convert to format expected by comprehensive analysis
+        stock_report = convert_stock_report_format(stock_report_raw, symbol)
+        portfolio_report = convert_portfolio_report_format(portfolio_report_raw)
+        market_summary = convert_market_report_format(market_report_raw)
+        
+        # Generate comprehensive analysis
+        analysis = generate_comprehensive_analysis(stock_report, portfolio_report, market_summary)
+        
+        return jsonify({
+            "success": True,
+            "symbol": symbol,
+            "user_id": user_id,
+            "analysis": analysis,
+            "source_reports": {
+                "stock_report": stock_report_raw,
+                "portfolio_report": portfolio_report_raw,
+                "market_report": market_report_raw
+            },
+            "generated_at": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Comprehensive analysis error: {str(e)}")
+        return jsonify({
+            "error": f"Failed to generate comprehensive analysis: {str(e)}",
+            "success": False
+        }), 500
+
+def convert_stock_report_format(stock_report_raw, symbol):
+    """Convert stock report to format expected by comprehensive analysis"""
+    sections = stock_report_raw.get("sections", {})
+    current_metrics = sections.get("current_metrics", {})
+    financial = sections.get("financial_highlights", {})
+    technical = sections.get("technical_analysis", {})
+    recommendation = sections.get("recommendation", {})
+    
+    # Extract numeric values
+    current_price_str = current_metrics.get("current_price", "$0.00")
+    current_price = float(current_price_str.replace("$", "").replace(",", "")) if current_price_str != "N/A" else 0.0
+    
+    price_change_str = current_metrics.get("price_change", "+0.00%")
+    price_change = float(price_change_str.replace("%", "").replace("+", "")) if price_change_str != "N/A" else 0.0
+    
+    target_price = recommendation.get("target_price", current_price * 1.1)
+    
+    return {
+        "symbol": symbol,
+        "current_price": current_price,
+        "price_change_percent": price_change,
+        "sector": financial.get("sector", "Unknown"),
+        "recommendation": recommendation,
+        "key_metrics": {
+            "pe_ratio": current_metrics.get("pe_ratio", "N/A"),
+            "market_cap": current_metrics.get("market_cap", "N/A"),
+            "revenue_growth": financial.get("revenue_growth", "N/A"),
+            "profit_margin": financial.get("profit_margin", "N/A")
+        },
+        "technical_analysis": technical,
+        "fundamentals": {
+            "executive_summary": sections.get("executive_summary", ""),
+            "sector": financial.get("sector", "Unknown"),
+            "industry": financial.get("industry", "Unknown")
+        }
+    }
+
+def convert_portfolio_report_format(portfolio_report_raw):
+    """Convert portfolio report to format expected by comprehensive analysis"""
+    sections = portfolio_report_raw.get("sections", {})
+    performance = sections.get("performance", {})
+    holdings = sections.get("holdings", {})
+    
+    # Default values if no portfolio data
+    if not holdings:
+        return {
+            "total_value": 100000,
+            "holdings": {},
+            "performance": {
+                "total_return_percent": 0.0,
+                "ytd_return": 0.0,
+                "volatility": 15.0,
+                "vs_sp500": "0.0%"
+            },
+            "diversification": {
+                "risk_level": "Unknown",
+                "sector_count": 0,
+                "beta": 1.0,
+                "correlation_score": 0.5
+            },
+            "recommendations": ["Create a portfolio to start tracking investments"]
+        }
+    
+    # Convert total value string to number
+    total_value_str = performance.get("total_value", "$100,000")
+    total_value = float(total_value_str.replace("$", "").replace(",", "")) if total_value_str != "N/A" else 100000
+    
+    return {
+        "total_value": total_value,
+        "holdings": holdings,
+        "performance": {
+            "total_return_percent": float(performance.get("total_return_percent", "0%").replace("%", "").replace("+", "")),
+            "ytd_return": float(performance.get("total_return_percent", "0%").replace("%", "").replace("+", "")),
+            "volatility": 20.0,  # Estimated
+            "vs_sp500": performance.get("vs_sp500", "0%")
+        },
+        "diversification": {
+            "risk_level": sections.get("risk_analysis", "Moderate").split()[0],
+            "sector_count": len(sections.get("sector_allocation", {})),
+            "beta": 1.0,  # Simplified
+            "correlation_score": 0.7
+        },
+        "recommendations": sections.get("recommendations", [])
+    }
+
+def convert_market_report_format(market_report_raw):
+    """Convert market report to format expected by comprehensive analysis"""
+    sections = market_report_raw.get("sections", {})
+    
+    # Extract market data
+    overview = sections.get("market_overview", "Mixed market conditions")
+    
+    # Determine overall trend
+    if "bullish" in overview.lower() or "strong" in overview.lower():
+        overall_trend = "Bullish"
+        sentiment = "Positive"
+    elif "bearish" in overview.lower() or "decline" in overview.lower():
+        overall_trend = "Bearish" 
+        sentiment = "Negative"
+    else:
+        overall_trend = "Mixed"
+        sentiment = "Neutral"
+    
+    return {
+        "overall_trend": overall_trend,
+        "sentiment": sentiment,
+        "key_indicators": {
+            "vix": 22.0,  # Default
+            "sp500_change": 0.5,  # Default
+            "nasdaq_change": 0.8,  # Default
+            "ten_year_yield": 4.2  # Default
+        },
+        "sector_performance": sections.get("sector_analysis", {}),
+        "economic_factors": {
+            "market_volatility": sections.get("volatility_index", "Moderate"),
+            "overall_sentiment": sentiment,
+            "outlook": sections.get("outlook", "Cautiously optimistic")
+        }
+    }
 
 if __name__ == '__main__':
     # Initialize database

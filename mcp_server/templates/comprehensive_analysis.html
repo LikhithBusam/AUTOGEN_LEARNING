@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comprehensive Investment Analysis</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #eee;
+        }
+        .input-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 8px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 12px;
+            resize: vertical;
+        }
+        .button-group {
+            text-align: center;
+            margin: 20px 0;
+        }
+        button {
+            background: #007AFF;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 0 10px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #0056CC;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .sample-btn {
+            background: #34C759;
+        }
+        .sample-btn:hover {
+            background: #2AAA4A;
+        }
+        .result-section {
+            margin-top: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background: white;
+        }
+        .analysis-output {
+            white-space: pre-wrap;
+            font-family: Georgia, serif;
+            line-height: 1.8;
+            color: #333;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #c62828;
+        }
+        .success {
+            background: #e8f5e8;
+            border-left: 4px solid #4caf50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Comprehensive Investment Analysis</h1>
+            <p>Generate professional investment analysis combining stock reports, portfolio data, and market conditions</p>
+        </div>
+
+        <div class="input-section">
+            <div class="input-group">
+                <label for="stockReport">Stock Report (JSON):</label>
+                <textarea id="stockReport" placeholder="Enter stock report JSON data here..."></textarea>
+            </div>
+
+            <div class="input-group">
+                <label for="portfolioReport">Portfolio Report (JSON):</label>
+                <textarea id="portfolioReport" placeholder="Enter portfolio report JSON data here..."></textarea>
+            </div>
+
+            <div class="input-group">
+                <label for="marketSummary">Market Summary Report (JSON):</label>
+                <textarea id="marketSummary" placeholder="Enter market summary JSON data here..."></textarea>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button onclick="loadSampleData()" class="sample-btn">📝 Load Sample Data</button>
+            <button onclick="generateAnalysis()" id="analyzeBtn">🎯 Generate Analysis</button>
+            <button onclick="clearAll()">🗑️ Clear All</button>
+        </div>
+
+        <div id="resultSection" class="result-section" style="display: none;">
+            <h3>📋 Investment Analysis Report</h3>
+            <div id="analysisOutput" class="analysis-output"></div>
+        </div>
+    </div>
+
+    <script>
+        function loadSampleData() {
+            // Sample stock report
+            const stockReport = {
+                "symbol": "AAPL",
+                "current_price": 175.43,
+                "price_change_percent": 2.35,
+                "sector": "Technology",
+                "recommendation": {
+                    "action": "BUY",
+                    "target_price": 195.00,
+                    "confidence": "High"
+                },
+                "key_metrics": {
+                    "pe_ratio": 28.5,
+                    "market_cap": 2750000000000,
+                    "revenue_growth": 8.2,
+                    "profit_margin": 25.3
+                },
+                "technical_analysis": {
+                    "overall_trend": "Bullish",
+                    "support_level": 170.00,
+                    "resistance_level": 180.00,
+                    "rsi": 65.2
+                }
+            };
+
+            // Sample portfolio report
+            const portfolioReport = {
+                "total_value": 250000,
+                "holdings": {
+                    "AAPL": {"shares": 285, "value": 50000, "weight": 20.0},
+                    "MSFT": {"shares": 150, "value": 45000, "weight": 18.0},
+                    "GOOGL": {"shares": 100, "value": 35000, "weight": 14.0},
+                    "NVDA": {"shares": 80, "value": 40000, "weight": 16.0},
+                    "JNJ": {"shares": 200, "value": 32000, "weight": 12.8}
+                },
+                "performance": {
+                    "total_return_percent": 12.5,
+                    "ytd_return": 8.7,
+                    "volatility": 18.2
+                },
+                "diversification": {
+                    "risk_level": "Moderate",
+                    "sector_count": 5,
+                    "correlation_score": 0.65
+                }
+            };
+
+            // Sample market summary
+            const marketSummary = {
+                "overall_trend": "Bullish",
+                "sentiment": "Positive",
+                "key_indicators": {
+                    "vix": 18.5,
+                    "sp500_change": 1.2,
+                    "nasdaq_change": 2.1,
+                    "ten_year_yield": 4.25
+                },
+                "sector_performance": {
+                    "Technology": 2.5,
+                    "Healthcare": 0.8,
+                    "Financials": 1.1,
+                    "Energy": -0.5
+                }
+            };
+
+            document.getElementById('stockReport').value = JSON.stringify(stockReport, null, 2);
+            document.getElementById('portfolioReport').value = JSON.stringify(portfolioReport, null, 2);
+            document.getElementById('marketSummary').value = JSON.stringify(marketSummary, null, 2);
+        }
+
+        async function generateAnalysis() {
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const resultSection = document.getElementById('resultSection');
+            const analysisOutput = document.getElementById('analysisOutput');
+
+            try {
+                // Get input data
+                const stockReport = JSON.parse(document.getElementById('stockReport').value || '{}');
+                const portfolioReport = JSON.parse(document.getElementById('portfolioReport').value || '{}');
+                const marketSummary = JSON.parse(document.getElementById('marketSummary').value || '{}');
+
+                // Validate inputs
+                if (!stockReport.symbol) {
+                    throw new Error('Stock report must contain at least a symbol');
+                }
+
+                // Show loading state
+                analyzeBtn.disabled = true;
+                analyzeBtn.textContent = '⏳ Generating Analysis...';
+                resultSection.style.display = 'block';
+                analysisOutput.innerHTML = '<div class="loading">Generating comprehensive analysis...</div>';
+
+                // Make API call
+                const response = await fetch('/api/analysis/comprehensive', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        stock_report: stockReport,
+                        portfolio_report: portfolioReport,
+                        market_summary: marketSummary
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    analysisOutput.innerHTML = `<div class="success">${result.analysis}</div>`;
+                } else {
+                    analysisOutput.innerHTML = `<div class="error">Analysis failed: ${result.error}</div>`;
+                }
+
+            } catch (error) {
+                analysisOutput.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            } finally {
+                analyzeBtn.disabled = false;
+                analyzeBtn.textContent = '🎯 Generate Analysis';
+            }
+        }
+
+        function clearAll() {
+            document.getElementById('stockReport').value = '';
+            document.getElementById('portfolioReport').value = '';
+            document.getElementById('marketSummary').value = '';
+            document.getElementById('resultSection').style.display = 'none';
+        }
+
+        // Load sample data on page load
+        window.onload = function() {
+            loadSampleData();
+        };
+    </script>
+</body>
+</html>
