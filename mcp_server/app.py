@@ -444,15 +444,24 @@ class SimpleDataAnalyst:
             
             # Run the async function
             try:
-                loop = asyncio.get_event_loop()
+                # Get or create event loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
                 if loop.is_running():
                     # If there's already a running loop, create a new task
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, get_ai_recommendation())
+                        future = executor.submit(self._run_async_analysis, get_ai_recommendation)
                         return future.result(timeout=30)  # 30 second timeout
                 else:
-                    return asyncio.run(get_ai_recommendation())
+                    return loop.run_until_complete(get_ai_recommendation())
             except Exception as e:
                 logger.error(f"Async execution error: {e}")
                 return self._rule_based_analysis(price_data, company_data, fundamentals, technical)
@@ -460,6 +469,15 @@ class SimpleDataAnalyst:
         except Exception as e:
             logger.error(f"AI analysis failed: {e}")
             return self._rule_based_analysis(price_data, company_data, fundamentals, technical)
+    
+    def _run_async_analysis(self, async_func):
+        """Helper method to run async functions in a new event loop"""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(async_func())
+        finally:
+            loop.close()
+    
     def _rule_based_analysis(self, price_data, company_data, fundamentals, technical):
         """Fallback rule-based recommendation generation"""
         try:
@@ -846,18 +864,28 @@ class NewsSentimentAnalyzer:
                     logger.error(f"AI sentiment analysis failed: {e}")
                     return self._rule_based_sentiment_analysis(text)
             
-            # Run async sentiment analysis
+            # Run async sentiment analysis  
             try:
-                loop = asyncio.get_event_loop()
+                # Get or create event loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Check if we're in a running loop
                 if loop.is_running():
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, get_sentiment())
+                        future = executor.submit(self._run_async_sentiment, get_sentiment)
                         result = future.result(timeout=15)
                         result["method"] = "ai_powered"
                         return result
                 else:
-                    result = asyncio.run(get_sentiment())
+                    result = loop.run_until_complete(get_sentiment())
                     result["method"] = "ai_powered"
                     return result
             except Exception as e:
@@ -867,6 +895,14 @@ class NewsSentimentAnalyzer:
         except Exception as e:
             logger.error(f"AI sentiment analysis error: {e}")
             return self._rule_based_sentiment_analysis(text)
+    
+    def _run_async_sentiment(self, async_func):
+        """Helper method to run async functions in a new event loop"""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(async_func())
+        finally:
+            loop.close()
     
     def _rule_based_sentiment_analysis(self, text: str) -> Dict[str, Any]:
         """Simple rule-based sentiment analysis as fallback"""
